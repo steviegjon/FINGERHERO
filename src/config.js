@@ -64,6 +64,7 @@ export const GEN = {
   surfaceTopMin: 330,     // highest a play-lane surface may sit (smaller y = higher)
   surfaceTopMax: 560,
   groundY: 640,           // road/ground level (hidden behind the sill)
+  windowTop: 38,          // = FRAME.top (ceilings reach up to here)
   biomeSec: 50,           // length of a biome in seconds at the speed it starts at
   tunnelSec: [4.5, 6],
 };

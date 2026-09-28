@@ -524,8 +524,10 @@ Generator.prototype.builders.overpass = function (p, biome) {
   const deckD = Math.min(lead, d0 + len - deckW - S * 0.6);
   const ceil = top - (PLAYER.slideH + HAZ.slideClear);
   const style = biome === BIOMES.highway ? 'concrete' : biome === BIOMES.city ? 'steel' : 'stone';
-  const deck = new Overpass({ kind: 'overpass', dLead: deckD, w: deckW, ceil, deckH: 74, style, biome: biome.name, seed: r.int(0, 1e6) });
-  this.logHazard(deck, deckD, deckD + deckW, 'slide', 'overpass', { refTop: top, bottom: ceil, top: ceil - 74 });
+  // the deck fills the window above the clearance, so it reads as a ceiling, never a platform
+  const deckH = ceil - (GEN.windowTop - 20);
+  const deck = new Overpass({ kind: 'overpass', dLead: deckD, w: deckW, ceil, deckH, style, biome: biome.name, seed: r.int(0, 1e6) });
+  this.logHazard(deck, deckD, deckD + deckW, 'slide', 'overpass', { refTop: top, bottom: ceil, top: ceil - deckH });
 };
 
 // Validation for tools/gen-check.mjs — returns number of violations.

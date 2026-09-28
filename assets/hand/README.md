@@ -1,7 +1,8 @@
 # Hand sprite sheet (optional)
 
-Drop `hand.json` + `hand.png` here and the game switches from the procedural
-hand to `SpriteHandRenderer` automatically (see `src/hand.js`).
+Drop `hand.json` + `hand.png` here, then set `"sheet": "hand.json"` in
+`manifest.json`. The game switches from the procedural hand to
+`SpriteHandRenderer` automatically (see `src/hand.js`); gameplay code is untouched.
 
 `hand.json` format:
 
