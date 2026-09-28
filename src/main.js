@@ -4,6 +4,7 @@ import { Input } from './input.js';
 import { Player } from './player.js';
 import { World } from './world/world.js';
 import { Generator } from './world/generator.js';
+import { drawPlayLane } from './render/playlane.js';
 
 const params = new URLSearchParams(location.search);
 const urlSeed = params.has('seed') ? parseInt(params.get('seed'), 10) >>> 0 : null;
@@ -40,7 +41,9 @@ class Game {
   }
 
   newWorld(seed) {
-    this.world = new World(new Generator(seed));
+    const gen = new Generator(seed);
+    gen.forcePattern = params.get('pattern'); // debug: ?pattern=carConvoy
+    this.world = new World(gen);
   }
 
   resize() {
@@ -62,6 +65,7 @@ class Game {
     if (e.code === 'BracketLeft') this.world.speedOverride = Math.max(120, (this.world.speedOverride ?? this.world.speed) - 60);
     if (e.code === 'BracketRight') this.world.speedOverride = Math.min(1400, (this.world.speedOverride ?? this.world.speed) + 60);
     if (e.code === 'Backslash') this.world.speedOverride = null;
+    if (e.code === 'KeyN') this.world.gen.skipBiome();
   }
 
   setState(s) { this.state = s; this.stateT = 0; }
@@ -69,18 +73,29 @@ class Game {
   startRun() {
     if (urlSeed == null) this.seed = (Math.random() * 1e9) >>> 0;
     this.newWorld(this.seed);
-    const top = this.world.gen.startRunway(this.world);
-    this.player.reset(top);
-    this.player.surface = this.world.surfaces[0] ?? null;
+    this.world.gen.startRunway(this.world);
+    this.world.update(0, SPEED.start); // activate the runway
+    const x0 = PLAYER.x - PLAYER.feetHalf, x1 = PLAYER.x + PLAYER.feetHalf;
+    let best = null;
+    for (const s of this.world.surfacesNear(x0, x1)) {
+      const top = s.topBetween(x0, x1, this.world.D);
+      if (top != null && (!best || top < best.top)) best = { s, top };
+    }
+    this.player.reset(best ? best.top : 470);
+    this.player.surface = best ? best.s : null;
     this.miles = 0;
     this.newBest = false;
     this.setState('playing');
   }
 
+  // Speed is a pure function of run distance (so the generator can predict it exactly),
+  // eased in from the attract speed at the start of a run.
   targetSpeed() {
+    const w = this.world;
     if (this.state === 'title') return SPEED.attract;
-    const t = this.world.runTime;
-    return Math.min(SPEED.max, SPEED.start + SPEED.ramp * t);
+    const s = w.gen.speedAt(w.D);
+    const e = Math.min(1, w.runTime / SPEED.easeIn);
+    return w.startSpeed != null && e < 1 ? w.startSpeed + (s - w.startSpeed) * e * e * (3 - 2 * e) : s;
   }
 
   step(dt) {
@@ -144,15 +159,7 @@ class Game {
     const D = w.prevD + (w.D - w.prevD) * alpha;
     ctx.fillStyle = '#9aa3ad';
     ctx.fillRect(0, 0, VIEW.W, VIEW.H);
-    ctx.fillStyle = '#4a525c';
-    for (const s of w.surfaces) {
-      const L = s.left(D);
-      ctx.beginPath();
-      ctx.moveTo(L, VIEW.H);
-      for (const [lx, y] of s.profile) ctx.lineTo(L + lx, y);
-      ctx.lineTo(L + s.w, VIEW.H);
-      ctx.fill();
-    }
+    drawPlayLane(ctx, w, D, w.time);
     if (this.state !== 'title') {
       const p = this.player;
       const y = p.prevY + (p.y - p.prevY) * alpha;
@@ -184,12 +191,13 @@ class Game {
     ctx.textAlign = 'left';
     ctx.font = '13px monospace';
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(FRAME.left + 6, FRAME.top + 6, 300, 96);
+    ctx.fillRect(FRAME.left + 6, FRAME.top + 6, 340, 114);
     ctx.fillStyle = '#9f9';
     const lines = [
       `fps ${this.fps.toFixed(0)}  state ${this.state}/${p.state}`,
       `speed ${w.speed.toFixed(0)}${w.speedOverride ? ' (override)' : ''}  D ${w.D.toFixed(0)}`,
-      `run ${w.runTime.toFixed(1)}s  seed ${this.seed}`,
+      `run ${w.runTime.toFixed(1)}s  seed ${this.seed}  diff ${w.gen.difficultyAt(w.D).toFixed(2)}`,
+      `biome ${w.gen.biomeAt(w.D).id}  pattern ${w.gen.lastPattern}`,
       `inv ${this.invincible ? 'ON' : 'off'}  surfaces ${w.surfaces.length} pend ${w.pending.length}`,
       `[ ] speed  \\ reset  I invincible  N next biome`,
     ];
