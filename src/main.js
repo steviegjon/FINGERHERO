@@ -12,6 +12,7 @@ import { WindowFrame, glassPath } from './render/window.js';
 import { drawHand, initHandRenderer } from './hand.js';
 import { drawHUD, drawGameOver, drawPressSpace, loadFonts, FONTS } from './ui.js';
 import { noise1, clamp, mixRgb } from './util.js';
+import { Audio } from './audio.js';
 
 const params = new URLSearchParams(location.search);
 const urlSeed = params.has('seed') ? parseInt(params.get('seed'), 10) >>> 0 : null;
@@ -37,6 +38,7 @@ class Game {
     this.fx = new Effects();
     this.windowFrame = new WindowFrame();
     this.bob = 0; this.bump = 0; this.bumpV = 0;
+    this.audio = new Audio();
     loadFonts();
     initHandRenderer();
     this.newWorld(this.seed);
@@ -75,6 +77,7 @@ class Game {
   }
 
   onKey(e) {
+    this.audio.start(); // audio context starts on the first keypress
     if (e.repeat) return;
     if (e.code === 'Backquote') this.debug = !this.debug;
     if (!this.debug) return;
@@ -148,6 +151,7 @@ class Game {
     this.player.events.length = 0;
 
     const moving = this.state !== 'dead';
+    if (this.state === 'playing') this.whooshes();
     this.fx.update(dt, moving ? w.speed : 0);
     if (moving) {
       this.sky.update(dt, w.speed);
@@ -198,10 +202,31 @@ class Game {
     if (p.dead) this.onDeath();
   }
 
-  onWorldEvent(type, e) { /* audio hooks (milestone 6) */ }
+  onWorldEvent(type, e) {
+    const a = this.audio;
+    if (type === 'birdTakeoff') a.flutter();
+    else if (type === 'tunnelEnter') a.whoosh(true, -0.8);
+    else if (type === 'tunnelExit') a.whoosh(true, -0.4);
+  }
+
+  // Whoosh when big things pass the fingers.
+  whooshes() {
+    const w = this.world, x = PLAYER.x + 150;
+    const check = (e, big) => {
+      if (e.whooshed) return;
+      if (e.left(w.D) < x) { e.whooshed = true; if (w.playing) this.audio.whoosh(big); }
+    };
+    for (const h of w.hazards) if (h.kind === 'sign' || h.kind === 'overpass') check(h, h.kind === 'overpass' || h.w > 90);
+    for (const s of w.surfaces) if (s.kind === 'vehicle' && (s.data.part === 'trailer' || s.data.part === 'loco')) check(s, true);
+  }
 
   onPlayerEvent(e) {
-    const p = this.player, fx = this.fx;
+    const p = this.player, fx = this.fx, a = this.audio;
+    if (e.type === 'step') a.tap(e.surface?.material);
+    else if (e.type === 'jump' && !e.bounce) a.jump();
+    else if (e.type === 'land') a.land(e.surface.material, e.surface.bouncy);
+    else if (e.type === 'slide') a.slide();
+    else if (e.type === 'death') { if (e.kind === 'bug') a.splat(); else if (e.kind === 'hit') a.thunk(); else a.drop(); }
     const k = p.surface?.k ?? 1;
     if (e.type === 'land') {
       const m = e.surface.material;
@@ -234,8 +259,22 @@ class Game {
     this.acc += dtReal;
     const step = PHYSICS.step;
     while (this.acc >= step) { this.step(step); this.acc -= step; }
+    this.updateAudio(dtReal);
     this.render(this.acc / step);
     requestAnimationFrame((t) => this.frame(t));
+  }
+
+  updateAudio(dt) {
+    const w = this.world, p = this.player;
+    this.audio.update(dt, {
+      biome: w.gen.biomeAt(w.D).id,
+      speed: w.speed,
+      tunnel: w.inTunnel ?? 0,
+      playing: this.state === 'playing',
+      onWire: this.state === 'playing' && p.grounded && p.surface?.material === 'wire',
+      dead: this.state === 'dead' || this.state === 'dying',
+      frozen: this.state === 'dead',
+    });
   }
 
   palette() {

@@ -174,7 +174,7 @@ export class Player {
     } else this._lastPhase = this.runPhase;
   }
 
-  jump(vel, holdable) {
+  jump(vel, holdable, bounce = false) {
     this.vy = -vel;
     this.grounded = false;
     this.surface = null;
@@ -185,7 +185,7 @@ export class Player {
     this.fastFall = false;
     this.sliding = false;
     this.squash = -0.22;
-    this.emit('jump', { vel });
+    this.emit('jump', { vel, bounce });
   }
 
   land(surface, top, input) {
@@ -201,7 +201,7 @@ export class Player {
     this.emit('land', { surface, impact });
     if (surface.bouncy) {
       const mul = input.jumpHeld ? PHYSICS.bounceHoldMul : PHYSICS.bounceMul;
-      this.jump(PHYSICS.jumpVel * mul, false);
+      this.jump(PHYSICS.jumpVel * mul, false, true);
       this.emit('bounce', { surface });
     } else if (this.buffer > 0) {
       this.jump(PHYSICS.jumpVel, true);

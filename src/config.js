@@ -83,10 +83,10 @@ export const TIME_OF_DAY = {
 };
 
 export const AUDIO = {
-  master: 0.55,
-  music: 0.42,
-  sfx: 0.7,
-  road: 0.32,
+  master: 0.6,
+  music: 0.9,
+  sfx: 0.95,
+  road: 0.2,
   crackle: 0.09,
   bpm: 80,
 };
