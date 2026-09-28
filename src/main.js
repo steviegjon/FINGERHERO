@@ -6,13 +6,15 @@ import { World } from './world/world.js';
 import { Generator } from './world/generator.js';
 import { drawSections, drawPlayLane, drawHazards, drawTunnelDarkness, drawTunnelMarkers } from './render/playlane.js';
 import { FX as Effects } from './render/fx.js';
-import { Sky, paletteAt, todPhase } from './render/sky.js';
+import { Sky, paletteAt } from './render/sky.js';
 import { Parallax } from './render/parallax.js';
 import { WindowFrame, glassPath } from './render/window.js';
 import { drawHand, initHandRenderer } from './hand.js';
 import { drawHUD, drawGameOver, drawPressSpace, loadFonts, FONTS } from './ui.js';
-import { noise1, clamp, mixRgb } from './util.js';
+import { noise1, clamp, mixRgb, lerp, smoothstep } from './util.js';
 import { Audio } from './audio.js';
+import { FogTitle } from './render/fog.js';
+import { TIME_OF_DAY } from './config.js';
 
 const params = new URLSearchParams(location.search);
 const urlSeed = params.has('seed') ? parseInt(params.get('seed'), 10) >>> 0 : null;
@@ -39,6 +41,9 @@ class Game {
     this.windowFrame = new WindowFrame();
     this.bob = 0; this.bump = 0; this.bumpV = 0;
     this.audio = new Audio();
+    this.fog = new FogTitle();
+    this.fogAlpha = 1;
+    this.tod = TIME_OF_DAY.attractPhase;
     loadFonts();
     initHandRenderer();
     this.newWorld(this.seed);
@@ -46,6 +51,11 @@ class Game {
     this.input.onAnyKey((e) => this.onKey(e));
     canvas.addEventListener('pointerdown', () => canvas.focus());
     window.addEventListener('resize', () => this.resize());
+    document.addEventListener('visibilitychange', () => {
+      const c = this.audio.ctx;
+      if (!c) return;
+      if (document.hidden) c.suspend?.(); else c.resume?.();
+    });
     this.resize();
     canvas.focus();
 
@@ -110,7 +120,47 @@ class Game {
     this.deathInfo = null;
     this.fx.reset();
     this.world.playing = true;
+    this.fogAlpha = 0;
+    this.tod = TIME_OF_DAY.startPhase;
     this.setState('playing');
+  }
+
+  // Title -> run without a cut: the world keeps rolling, the fog fades, the hand rises into frame.
+  beginFromTitle() {
+    const w = this.world;
+    w.gen.beginRun(w.D);
+    w.startSpeed = w.speed;
+    w.runTime = 0;
+    w.playing = true;
+    this.player.reset(FRAME.sill + 110);
+    this.player.grounded = false;
+    this.riseFrom = FRAME.sill + 110;
+    this.miles = 0;
+    this.newBest = false;
+    this.deathInfo = null;
+    this.setState('starting');
+  }
+
+  riseHand(dt) {
+    const p = this.player, w = this.world;
+    p.prevY = p.y;
+    const x0 = PLAYER.x - PLAYER.feetHalf, x1 = PLAYER.x + PLAYER.feetHalf;
+    let best = null;
+    for (const s of w.surfacesNear(x0, x1)) {
+      const top = s.topBetween(x0, x1, w.D);
+      if (top != null && (!best || top < best.top)) best = { s, top };
+    }
+    const k = smoothstep(0, 0.85, this.stateT);
+    const target = best ? best.top : 470;
+    p.y = lerp(this.riseFrom, target - 26 * Math.sin(Math.PI * k) * (1 - k), k);
+    p.runPhase = (p.runPhase + dt * 1.6) % 1;
+    if (k >= 1 && best) {
+      p.y = best.top; p.prevY = best.top;
+      p.grounded = true; p.surface = best.s; p.vy = 0;
+      p.squash = 0.2;
+      p.emit('land', { surface: best.s, impact: 300 });
+      this.setState('playing');
+    }
   }
 
   // Speed is a pure function of run distance (so the generator can predict it exactly),
@@ -128,14 +178,24 @@ class Game {
     this.stateT += dt;
     const w = this.world;
     const playing = this.state === 'playing' || this.state === 'dying';
+    if (this.state === 'starting') this.fx.update(dt, w.speed);
 
     if (this.state === 'title') {
-      if (pressed.space) { this.startRun(); return; }
+      this.fog.update(dt, true);
+      this.tod += (dt / TIME_OF_DAY.cycleSec) * 0.15;
+      if (pressed.space) { this.beginFromTitle(); return; }
       w.update(dt, this.targetSpeed());
+    } else if (this.state === 'starting') {
+      w.runTime += dt;
+      this.tod += dt / TIME_OF_DAY.cycleSec;
+      w.update(dt, this.targetSpeed());
+      this.fogAlpha = Math.max(0, this.fogAlpha - dt / 0.6);
+      this.riseHand(dt);
     } else if (this.state === 'dead') {
       if (pressed.space) { this.startRun(); return; }
     } else if (this.state === 'playing') {
       w.runTime += dt;
+      this.tod += dt / TIME_OF_DAY.cycleSec;
       w.update(dt, this.targetSpeed());
       this.miles += (w.speed * SPEED.mphPerPx * dt) / 3600;
     } else if (this.state === 'dying') {
@@ -233,6 +293,7 @@ class Game {
       if (m === 'wire') fx.burst('spark', p.x, p.y, 7, { k });
       else if (e.surface.bouncy) { fx.burst('leaf', p.x, p.y, 8, { k }); e.surface.data.bounceT = this.world.time; }
       else fx.burst('dust', p.x, p.y, e.impact > 700 ? 9 : 5, { k, color: m === 'metal' ? '#cfd3d8' : '#d9cdb2' });
+      if (e.impact > 900) this.bumpV += Math.min(140, (e.impact - 900) * 0.25); // screen bump on hard landings
     } else if (e.type === 'death') {
       if (e.kind === 'bug' && this.deathInfo) {
         fx.splat(this.deathInfo.x + 26, this.deathInfo.y - 8, this.deathInfo.hazard.variant);
@@ -278,9 +339,7 @@ class Game {
   }
 
   palette() {
-    const w = this.world;
-    const phase = todPhase(w.runTime, this.state === 'title') + (this.todOffset ?? 0);
-    return paletteAt(phase);
+    return paletteAt(this.tod + (this.todOffset ?? 0));
   }
 
   handState(alpha, P) {
@@ -332,22 +391,22 @@ class Game {
     // ---- the glass itself, then the kid's hand in front of it
     this.windowFrame.drawGlass(ctx, S);
     this.fx.drawSplats(ctx);
+    if (this.state === 'title' || this.state === 'starting') this.fog.draw(ctx, S, t, this.state === 'title' ? 1 : this.fogAlpha);
     if (this.state !== 'title') {
       ctx.save();
       ctx.translate(0, bob);
-      drawHand(ctx, this.handState(alpha, P), t);
+      const hs = this.handState(alpha, P);
+      if (this.state === 'starting') hs.state = 'run';
+      drawHand(ctx, hs, t);
       ctx.restore();
     }
     this.fx.drawFlash(ctx);
     this.windowFrame.drawFrame(ctx, S, P.ambient, (w.inTunnel ?? 0) * (0.3 + (w.tunnelLamp ?? 0)));
 
     // ---- UI on the glass
-    if (this.state !== 'title') drawHUD(ctx, this);
-    if (this.state === 'title') {
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = `90px ${FONTS.hand}`;
-      ctx.fillText('FINGER HERO', VIEW.W / 2, VIEW.H / 2 - 40);
-      drawPressSpace(ctx, t, 1);
-    }
+    if (this.state === 'starting') drawHUD(ctx, this, smoothstep(0.3, 0.9, this.stateT));
+    else if (this.state !== 'title') drawHUD(ctx, this);
+    if (this.state === 'title') drawPressSpace(ctx, t, smoothstep(1.6, 2.6, this.fog.writeT), this.best, !document.hasFocus());
     if (this.state === 'dead') drawGameOver(ctx, this, this.stateT);
     if (this.debug) this.renderDebug(ctx, P);
   }

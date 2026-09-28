@@ -147,15 +147,21 @@ export function drawGameOver(ctx, game, t) {
 }
 
 // Tiny caption under the fog title.
-export function drawPressSpace(ctx, t, alpha) {
+export function drawPressSpace(ctx, t, alpha, best = 0, needsFocus = false) {
+  if (alpha <= 0) return;
   ctx.save();
-  ctx.globalAlpha = alpha * (0.55 + 0.45 * Math.sin(t * 3) ** 2);
-  ctx.font = `26px ${FONTS.hand}`;
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#f7f4ec';
   ctx.shadowColor = 'rgba(0,0,0,0.55)';
   ctx.shadowBlur = 6;
-  ctx.fillText('press SPACE', VIEW.W / 2, FRAME.sill - 70);
+  ctx.fillStyle = '#f7f4ec';
+  ctx.globalAlpha = alpha * (0.6 + 0.4 * Math.sin(t * 3) ** 2);
+  ctx.font = `30px ${FONTS.hand}`;
+  ctx.fillText(needsFocus ? 'click the window, then press SPACE' : 'press SPACE', VIEW.W / 2, 500);
+  ctx.globalAlpha = alpha * 0.75;
+  ctx.font = `20px ${FONTS.hand}`;
+  const help = 'SPACE / ↑ jump (hold = higher)   ·   ↓ slide, or fast-fall in the air';
+  ctx.fillText(help, VIEW.W / 2, 536);
+  if (best > 0) ctx.fillText(`best ${best.toFixed(1)} mi`, VIEW.W / 2, 566);
   ctx.restore();
 }
 

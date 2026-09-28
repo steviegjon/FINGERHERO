@@ -112,6 +112,7 @@ export class Generator {
   }
   pushSurface(s, { advance = true, hazardOk = true } = {}) {
     this.push(s);
+    if (s.kind !== 'wire' && s.kind !== 'polecap') this.lastWasPole = false;
     if (advance) {
       this.cursorD = Math.max(this.cursorD, s.dTail);
       this.lastTop = s.profile[s.profile.length - 1][1];
@@ -143,6 +144,7 @@ export class Generator {
     for (const g of this.segLog) this.cursorD = Math.max(this.cursorD, g.d1);
     const last = this.segLog.reduce((a, g) => (!a || g.d1 > a.d1 ? g : a), null);
     if (last) this.lastTop = last.s.profile[last.s.profile.length - 1][1];
+    this.lastWasPole = !!last && last.s.kind === 'polecap';
     this.blockHazardsUntil = -Infinity;
   }
 
@@ -155,7 +157,7 @@ export class Generator {
     this.biomes = [{ startD: -Infinity, id: 'country', loop: 0 }];
     this.nextBiomeD = D + GEN.biomeSec * SPEED.start;
     this.blockHazardsUntil = this.cursorD + GEN.startRunwaySec * SPEED.start;
-    this.buildRunway(BIOMES.country, GEN.startRunwaySec, true);
+    this.buildRunway(BIOMES.country, GEN.startRunwaySec, true, true);
   }
 
   // Fresh run with no attract content (restart): runway directly under the fingers. Returns top y.
@@ -212,13 +214,13 @@ export class Generator {
   }
 
   // A long, hazard-free, biome-appropriate surface.
-  buildRunway(biome, sec, safe) {
+  buildRunway(biome, sec, safe, continuous = false) {
     const len = sec * this.speedAt(this.cursorD);
     const kind = biome.fore === 'guardrail' ? 'barrier' : biome === BIOMES.country ? 'wires' : 'roof';
     const d0 = this.cursorD;
     if (kind === 'wires') {
       const spans = Math.max(2, Math.ceil(len / 240));
-      this.builders.wires.call(this, { spans: [spans, spans], missing: 0 }, biome, { safe, first: this.segLog.length === 0 });
+      this.builders.wires.call(this, { spans: [spans, spans], missing: 0 }, biome, { safe, first: continuous || this.segLog.length === 0 });
     } else if (kind === 'barrier') {
       const top = this.clampTop(530);
       const gap = this.segLog.length ? this.gapTo(top, 0.4) : 0;
@@ -262,16 +264,18 @@ Generator.prototype.builders = {
     let top = this.clampTop(o.attract ? r.float(440, 470) : this.lastTop + r.float(-30, 30));
     top = clamp(top, 390, 520);
     // first pole
-    let gap = this.segLog.length && !o.first ? this.gapTo(top) : 0;
-    if (o.attract && this.segLog.length) gap = 0; // continuous during attract (safe start)
-    let poleD = this.cursorD + gap + capW / 2;
+    // continuing an existing wire run (attract mode, start runway): reuse the last pole, no gap
+    const cont = this.segLog.length > 0 && (o.first || o.attract) && this.lastWasPole;
+    const gap = this.segLog.length && !o.first && !o.attract ? this.gapTo(top) : 0;
+    if (cont) top = this.lastTop;
+    let poleD = cont ? this.cursorD - capW / 2 : this.cursorD + gap + capW / 2;
     let prevTop = top;
     const addPole = (d, t) => {
       this.push(new Decor({ kind: 'pole', dLead: d - 6, w: 12, biome: biome.name, data: { top: t, seed: r.int(0, 1e6) } }));
       const cap = new Surface({ kind: 'polecap', dLead: d - capW / 2, w: capW, top: t, material: 'wood', biome: biome.name });
       this.pushSurface(cap);
     };
-    addPole(poleD, prevTop);
+    if (!cont) addPole(poleD, prevTop);
     for (let i = 0; i < spans; i++) {
       let nextTop = clamp(prevTop + r.float(-22, 22), 390, 525);
       if (missing.has(i)) {
@@ -295,6 +299,7 @@ Generator.prototype.builders = {
     }
     this.cursorD = poleD + capW / 2;
     this.lastTop = prevTop;
+    this.lastWasPole = true;
   },
 
   roofs(p, biome) {
