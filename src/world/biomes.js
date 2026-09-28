@@ -20,7 +20,7 @@ export const BIOMES = {
   town: {
     name: 'Small Town',
     patterns: { rooftops: 5, carConvoy: 2.5, wires: 2, trees: 1.5, overpass: 0.8 },
-    hazards: { bug: 2, sign: 3, bird: 2, chimney: 0 },
+    hazards: { bug: 2, sign: 3, bird: 2, chimney: 2 },
     signs: ['welcome', 'speed30', 'school', 'diner'],
     backdrop: ['hills', 'steeple', 'storefronts'],
     fore: 'hedge',
@@ -42,7 +42,7 @@ export const BIOMES = {
   city: {
     name: 'City',
     patterns: { tallRooftops: 5, train: 3, bridge: 1.5, overpass: 1, carConvoy: 1 },
-    hazards: { pigeon: 3, sign: 1.5, bug: 1 },
+    hazards: { pigeon: 3, sign: 1.5, bug: 1, chimney: 0.8 },
     signs: ['metro', 'speed25', 'oneway', 'welcomeCity'],
     backdrop: ['skylineFar', 'skylineMid', 'rowhouses'],
     fore: 'posts',

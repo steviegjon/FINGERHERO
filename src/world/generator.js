@@ -10,6 +10,8 @@ import { RNG, clamp, lerp } from '../util.js';
 import { BIOMES, BIOME_ORDER, PATTERNS } from './biomes.js';
 import { airtimeTo, jumpApex } from '../player.js';
 import { VEHICLES, ROAD_Y } from './vehicles.js';
+import { Bug, Sign, Bird, Overpass, Chimney } from './hazards.js';
+import { SIGNS } from './biomes.js';
 
 const APEX = jumpApex();
 
@@ -337,4 +339,206 @@ Generator.prototype.placeVehicle = function (type, k, biome, data = {}) {
   vehicle.parts = made;
   for (const s of made) this.pushSurface(s);
   return made;
+};
+
+// ---------------------------------------------------------------------------
+// Hazard placement. Fairness rules:
+//  * hazards sit on a continuous run of surface, at least hazardEdgeSafetySec from either end
+//    (so no hazard ever overlaps a forced gap jump or a landing);
+//  * consecutive hazards are ≥ hazardMinSpacingSec apart, so two never demand conflicting moves;
+//  * every hazard leaves at least one answer: slide under (head-height things), jump over
+//    (low things), or simply stay grounded (high things).
+
+const HAZ = {
+  slideClear: 14, // px of clearance above the sliding hurtbox
+};
+
+Generator.prototype.runsFrom = function (segs) {
+  const list = segs.filter((g) => g.hazardOk).slice().sort((a, b) => a.d0 - b.d0);
+  const runs = [];
+  for (const g of list) {
+    const last = runs[runs.length - 1];
+    if (last && g.d0 <= last.d1 + 1) { last.d1 = Math.max(last.d1, g.d1); last.segs.push(g); }
+    else runs.push({ d0: g.d0, d1: g.d1, segs: [g] });
+  }
+  return runs;
+};
+
+// Highest (min y) and lowest (max y) surface top the fingers would stand on across [D0, D1].
+Generator.prototype.topRange = function (segs, D0, D1) {
+  let hi = Infinity, lo = -Infinity;
+  const n = 6;
+  for (let i = 0; i <= n; i++) {
+    const D = D0 + ((D1 - D0) * i) / n;
+    let best = Infinity;
+    for (const g of segs) {
+      if (g.d0 <= D && g.d1 >= D) best = Math.min(best, g.s.topAtLocal((D - g.d0) * g.s.k));
+    }
+    if (best < Infinity) { hi = Math.min(hi, best); lo = Math.max(lo, best); }
+  }
+  return { hi, lo };
+};
+
+// Find a D for a hazard occupying lenD (at the fingers), inside one run, respecting spacing.
+Generator.prototype.findSlot = function (runs, lenD, pred = null) {
+  const S = this.speedAt(this.cursorD);
+  const edge = GEN.hazardEdgeSafetySec * S;
+  const minD = Math.max(this.lastHazardD + GEN.hazardMinSpacingSec * S, this.blockHazardsUntil);
+  const options = [];
+  for (const run of runs) {
+    if (pred && !pred(run)) continue;
+    const a = Math.max(run.d0 + edge, minD), b = run.d1 - edge - lenD;
+    if (b > a) options.push({ run, a, b });
+  }
+  if (!options.length) return null;
+  const o = options[0]; // earliest run: leaves room for more hazards later in the pattern
+  const D = this.rng.float(o.a, o.a + Math.min(o.b - o.a, S * 0.9));
+  return { run: o.run, D };
+};
+
+Generator.prototype.logHazard = function (h, d0, d1, needs, kind, extra = {}) {
+  this.push(h);
+  this.lastHazardD = d1;
+  this.hazardLog.push({ d0, d1, needs, kind, ...extra });
+  if (this.hazardLog.length > 400) this.hazardLog.splice(0, 200);
+};
+
+Generator.prototype.hazardTypes = {
+  bug: { place(runs, biome) { return this.placeBug(runs, biome, false); } },
+  bigBug: { place(runs, biome) { return this.placeBug(runs, biome, true); } },
+  pigeon: { place(runs, biome) { return this.placeBug(runs, biome, false, true); } },
+  sign: {
+    place(runs, biome) {
+      const r = this.rng;
+      const id = r.pick(biome.signs);
+      const def = SIGNS[id];
+      const w = def.w;
+      const slot = this.findSlot(runs, w);
+      if (!slot) return false;
+      const { hi } = this.topRange(slot.run.segs, slot.D, slot.D + w);
+      const panelBottom = hi - (PLAYER.slideH + HAZ.slideClear);
+      const panelH = def.lines?.length === 3 ? 56 : def.shape === 'diamond' ? 52 : 46;
+      const panelTop = panelBottom - panelH;
+      const sign = new Sign({ kind: 'sign', dLead: slot.D, w, def, panelTop, panelBottom, biome: biome.name, seed: r.int(0, 1e6) });
+      this.logHazard(sign, slot.D, slot.D + w, 'slide', 'sign', { refTop: hi, bottom: panelBottom, top: panelTop });
+      return true;
+    },
+  },
+  bird: {
+    place(runs, biome) {
+      const r = this.rng;
+      const w = 22;
+      const pad = 20;
+      const slot = this.findSlot(runs, w + pad * 2, (run) => run.segs.some((g) => g.s.kind === 'wire'));
+      if (!slot) return false;
+      const D = slot.D + pad;
+      // perch on the wire span covering D
+      const g = slot.run.segs.find((q) => q.s.kind === 'wire' && q.d0 <= D && q.d1 >= D + w);
+      if (!g) return false;
+      const perchY = g.s.topAtLocal(D - g.d0 + w / 2);
+      const { hi } = this.topRange(slot.run.segs, slot.D, slot.D + w + pad * 2);
+      const hoverY = hi - (PLAYER.slideH + HAZ.slideClear + 7);
+      const bird = new Bird({ kind: 'bird', dLead: D, w, perchY, hoverY, biome: biome.name, seed: r.int(0, 1e6) });
+      this.logHazard(bird, slot.D, slot.D + w + pad * 2, 'slide', 'bird', { refTop: hi, bottom: hoverY + 7 });
+      return true;
+    },
+  },
+  chimney: {
+    place(runs, biome) {
+      const r = this.rng;
+      const w = 26, h = 34;
+      const slot = this.findSlot(runs, w, (run) => run.segs.length === 1 && run.segs[0].s.kind === 'roof' && run.segs[0].s.data.style !== 'slope');
+      if (!slot) return false;
+      const roof = slot.run.segs[0].s;
+      const top = roof.top - h;
+      const cap = new Surface({ kind: 'chimney', dLead: slot.D, w, top, biome: biome.name, parent: roof });
+      this.push(cap);
+      this.segLog.push({ d0: cap.dLead, d1: cap.dTail, s: cap, hazardOk: false });
+      const face = new Chimney({ kind: 'chimney', dLead: slot.D, w, top, base: roof.top, biome: biome.name });
+      this.logHazard(face, slot.D, slot.D + w, 'jump', 'chimney', { refTop: roof.top, height: h });
+      return true;
+    },
+  },
+};
+
+Generator.prototype.placeBug = function (runs, biome, big, pigeon = false) {
+  const r = this.rng;
+  const variant = pigeon ? 'pigeon' : big ? r.pick(['dragonfly', 'beetle']) : r.pick(['gnat', 'fly', 'fly']);
+  const size = { gnat: [12, 9], fly: [15, 11], dragonfly: [30, 12], beetle: [22, 15], pigeon: [28, 15] }[variant];
+  const k = pigeon ? r.float(1.2, 1.35) : r.float(1.2, 1.45);
+  // D length at the fingers: it crosses our x while the world scrolls (w + playerW)/k
+  const lenD = (size[0] + PLAYER.w) / k;
+  const slot = this.findSlot(runs, lenD);
+  if (!slot) return false;
+  const { hi } = this.topRange(slot.run.segs, slot.D - 30, slot.D + lenD + 30);
+  const high = !big && r.chance(pigeon ? 0.4 : 0.35);
+  const amp = big ? r.float(3, 6) : r.float(4, 9);
+  let baseY;
+  if (high) baseY = hi - r.float(104, 132);
+  else baseY = hi - (PLAYER.slideH + HAZ.slideClear) - amp - size[1] / 2 - r.float(0, 10);
+  const bug = new Bug({
+    kind: 'bug', variant, k, dLead: slot.D, w: size[0], h: size[1], baseY, amp,
+    freq: r.float(1.2, 2.4), phase: r.float(0, 6.28), biome: biome.name, seed: r.int(0, 1e6),
+  });
+  const bottom = baseY + amp + size[1] / 2, top = baseY - amp - size[1] / 2;
+  this.logHazard(bug, slot.D, slot.D + lenD, high ? 'stay' : 'slide', variant, { refTop: hi, bottom, top });
+  return true;
+};
+
+Generator.prototype.placeHazards = function (pattern, biome, segStart) {
+  if (this.mode !== 'play' || !pattern.hazardSlots) return;
+  const r = this.rng;
+  const diff = Math.min(1, this.difficultyAt(this.cursorD));
+  const chance = lerp(DIFFICULTY.hazardChance[0], DIFFICULTY.hazardChance[1], diff);
+  const runs = this.runsFrom(this.segLog.slice(segStart));
+  if (!runs.length) return;
+  for (let i = 0; i < pattern.hazardSlots; i++) {
+    if (!r.chance(chance)) continue;
+    const types = Object.entries(biome.hazards).filter(([t, wt]) => wt > 0 && this.hazardTypes[t]);
+    // try the weighted pick first, then anything else that fits
+    const first = r.weighted(types, ([, wt]) => wt);
+    const order = [first, ...types.filter((t) => t !== first)];
+    for (const [t] of order) if (this.hazardTypes[t].place.call(this, runs, biome)) break;
+  }
+};
+
+// Overpass / low bridge: a long barrier under a deck you must slide beneath.
+Generator.prototype.builders.overpass = function (p, biome) {
+  const r = this.rng;
+  const S = this.speedAt(this.cursorD);
+  const top = this.clampTop(clamp(this.lastTop + r.float(-30, 30), 470, 545));
+  const len = S * r.float(2.6, 3.3);
+  const gap = this.gapTo(top);
+  const d0 = this.cursorD + gap;
+  const kind = biome.fore === 'guardrail' ? 'barrier' : biome === BIOMES.city ? 'barrier' : 'railing';
+  const base = new Surface({ kind, dLead: d0, w: len, top, biome: biome.name });
+  this.pushSurface(base, { hazardOk: false });
+  const deckW = r.float(230, 330);
+  const lead = Math.max(d0 + S * 0.95, this.lastHazardD + GEN.hazardMinSpacingSec * S);
+  const deckD = Math.min(lead, d0 + len - deckW - S * 0.6);
+  const ceil = top - (PLAYER.slideH + HAZ.slideClear);
+  const style = biome === BIOMES.highway ? 'concrete' : biome === BIOMES.city ? 'steel' : 'stone';
+  const deck = new Overpass({ kind: 'overpass', dLead: deckD, w: deckW, ceil, deckH: 74, style, biome: biome.name, seed: r.int(0, 1e6) });
+  this.logHazard(deck, deckD, deckD + deckW, 'slide', 'overpass', { refTop: top, bottom: ceil, top: ceil - 74 });
+};
+
+// Validation for tools/gen-check.mjs — returns number of violations.
+Generator.prototype.checkHazards = function (seed) {
+  let bad = 0;
+  const log = this.hazardLog.slice().sort((a, b) => a.d0 - b.d0);
+  const slideTop = PLAYER.slideH - PLAYER.hurtInset; // sliding hurtbox height above feet
+  for (let i = 0; i < log.length; i++) {
+    const h = log[i];
+    const S = this.speedAt(h.d0);
+    if (i > 0 && h.d0 - log[i - 1].d1 < GEN.hazardMinSpacingSec * S * 0.98) {
+      bad++; if (bad < 10) console.log(`seed ${seed}: hazards too close at D ${h.d0.toFixed(0)} (${log[i - 1].kind} -> ${h.kind})`);
+    }
+    if (h.needs === 'slide' && h.bottom > h.refTop - slideTop - 4) {
+      bad++; if (bad < 10) console.log(`seed ${seed}: ${h.kind} too low to slide under at D ${h.d0.toFixed(0)}`);
+    }
+    if (h.needs === 'stay' && h.bottom > h.refTop - PLAYER.h) {
+      bad++; if (bad < 10) console.log(`seed ${seed}: high ${h.kind} hits a standing player at D ${h.d0.toFixed(0)}`);
+    }
+  }
+  return bad;
 };

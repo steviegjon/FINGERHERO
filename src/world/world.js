@@ -65,6 +65,16 @@ export class World {
     for (const d of this.decor) d.update?.(dt, this);
   }
 
+  // First hazard box overlapping the rect, or null.
+  hazardHit(hb, D = this.D, t = this.time, list = this.hazards) {
+    for (const h of list) {
+      for (const b of h.boxes(D, t)) {
+        if (b.x < hb.x + hb.w && b.x + b.w > hb.x && b.y < hb.y + hb.h && b.y + b.h > hb.y) return { hazard: h, box: b };
+      }
+    }
+    return null;
+  }
+
   surfacesNear(x0, x1) {
     const out = [];
     for (const s of this.surfaces) {

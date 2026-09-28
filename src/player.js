@@ -62,7 +62,11 @@ export class Player {
   // world: { surfacesAt(x0, x1) -> [{surface, top}], speed, ceilingAt(x0,x1) }
   update(dt, input, pressed, world) {
     this.prevY = this.y;
-    if (this.dead) { this.deathT += dt; return; }
+    if (this.dead) {
+      this.deathT += dt;
+      if (this.deathKind === 'fall') { this.vy = Math.min(PHYSICS.maxFallSpeed, this.vy + PHYSICS.gravity * dt); this.y += this.vy * dt; }
+      return;
+    }
 
     if (pressed.jump) this.buffer = PHYSICS.jumpBuffer;
     else this.buffer = Math.max(0, this.buffer - dt);
@@ -71,8 +75,17 @@ export class Player {
 
     // --- stay glued to the surface we're on (slopes, sagging wires, car profiles)
     if (this.grounded) {
-      const top = this.surface ? this.surface.topBetween(fx0, fx1, world.D) : null;
-      if (top != null && top - this.y <= PHYSICS.snapDown && this.y - top <= PHYSICS.snapUp) {
+      let top = this.surface ? this.surface.topBetween(fx0, fx1, world.D) : null;
+      const ok = (t) => t != null && t - this.y <= PHYSICS.snapDown && this.y - t <= PHYSICS.snapUp;
+      if (!ok(top)) {
+        // hand over to an adjacent surface (wire -> pole cap -> wire, trailer -> cab, ...)
+        top = null;
+        for (const s of world.surfacesNear(fx0, fx1)) {
+          const t = s.topBetween(fx0, fx1, world.D);
+          if (ok(t) && (top == null || t < top)) { top = t; this.surface = s; }
+        }
+      }
+      if (top != null) {
         this.y = top;
       } else {
         // walked off the edge

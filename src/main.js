@@ -4,7 +4,9 @@ import { Input } from './input.js';
 import { Player } from './player.js';
 import { World } from './world/world.js';
 import { Generator } from './world/generator.js';
-import { drawPlayLane } from './render/playlane.js';
+import { drawPlayLane, drawHazards } from './render/playlane.js';
+import { FX as Effects } from './render/fx.js';
+import { drawHUD, drawGameOver, drawPressSpace, loadFonts, FONTS } from './ui.js';
 
 const params = new URLSearchParams(location.search);
 const urlSeed = params.has('seed') ? parseInt(params.get('seed'), 10) >>> 0 : null;
@@ -27,6 +29,8 @@ class Game {
     this.miles = 0;
     this.newBest = false;
     this.seed = urlSeed ?? ((Math.random() * 1e9) >>> 0);
+    this.fx = new Effects();
+    loadFonts();
     this.newWorld(this.seed);
 
     this.input.onAnyKey((e) => this.onKey(e));
@@ -44,7 +48,10 @@ class Game {
     const gen = new Generator(seed);
     gen.forcePattern = params.get('pattern'); // debug: ?pattern=carConvoy
     this.world = new World(gen);
+    this.world.onEvent = (type, e) => this.onWorldEvent(type, e);
   }
+
+  onWorldEvent(type, e) { /* audio/fx hooks (milestones 5-6) */ }
 
   resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -85,6 +92,9 @@ class Game {
     this.player.surface = best ? best.s : null;
     this.miles = 0;
     this.newBest = false;
+    this.deathInfo = null;
+    this.fx.reset();
+    this.world.playing = true;
     this.setState('playing');
   }
 
@@ -117,27 +127,63 @@ class Game {
       this.world.runTime += dt;
       this.world.update(dt, this.targetSpeed());
       this.miles += (this.world.speed * SPEED.mphPerPx * dt) / 3600;
+    } else if (this.state === 'dying') {
+      // the world keeps rolling for a beat, easing down, then freezes under the overlay
+      this.world.update(dt, this.world.speed * Math.exp(-4 * dt));
     }
     if (playing) {
       this.player.update(dt, this.input, pressed, this.world);
       if (this.state === 'playing') this.checkDeath();
       if (this.state === 'dying' && this.stateT >= FX.deathBeat) this.setState('dead');
     }
+    for (const e of this.player.events) this.onPlayerEvent(e);
     this.player.events.length = 0;
+    this.fx.update(dt, this.state === 'dead' ? 0 : this.world.speed);
   }
 
   checkDeath() {
-    const p = this.player;
+    const p = this.player, w = this.world;
     if (p.y - 20 > FRAME.sill) {
-      if (this.invincible) { p.y = 380; p.vy = -600; }
+      if (this.invincible) { p.y = 380; p.vy = -600; p.grounded = false; }
       else p.kill('fall');
+    }
+    if (!p.dead && !this.invincible) {
+      const hit = w.hazardHit(p.hurtbox());
+      if (hit) {
+        p.kill(hit.hazard.deathKind);
+        this.deathInfo = { hazard: hit.hazard, x: hit.box.x + hit.box.w / 2, y: hit.box.y + hit.box.h / 2 };
+        hit.hazard.hitPlayer = true;
+      }
     }
     if (p.dead) this.onDeath();
   }
 
+  onPlayerEvent(e) {
+    const p = this.player, fx = this.fx;
+    const k = p.surface?.k ?? 1;
+    if (e.type === 'land') {
+      const m = e.surface.material;
+      if (m === 'wire') fx.burst('spark', p.x, p.y, 7, { k });
+      else if (e.surface.bouncy) fx.burst('leaf', p.x, p.y, 8, { k });
+      else fx.burst('dust', p.x, p.y, e.impact > 700 ? 9 : 5, { k, color: m === 'metal' ? '#cfd3d8' : '#d9cdb2' });
+    } else if (e.type === 'jump' && e.vel) {
+      if (!this.player.grounded) fx.burst('dust', p.x, p.y, 3, { k });
+    } else if (e.type === 'death') {
+      if (e.kind === 'bug' && this.deathInfo) {
+        this.fx.splat(this.deathInfo.x + 30, this.deathInfo.y - 10, this.deathInfo.hazard.variant);
+        this.deathInfo.hazard.dead = true;
+      } else if (e.kind === 'hit') {
+        this.fx.shake = 0.6;
+        const h = this.deathInfo?.hazard;
+        if (h?.kind === 'bird') this.fx.burst('feather', this.deathInfo.x, this.deathInfo.y, 10, { k: 0.2 });
+        else this.fx.burst('chip', p.x + 14, p.y - p.h * 0.6, 6, { k: 0 });
+      }
+    }
+  }
+
   onDeath() {
     this.setState('dying');
-    if (this.miles > this.best) { this.best = this.miles; this.newBest = true; saveBest(this.best); }
+    if (this.miles > this.best) { this.newBest = this.best > 0 || this.miles >= 0.1; this.best = this.miles; saveBest(this.best); }
   }
 
   frame(now) {
@@ -160,6 +206,8 @@ class Game {
     ctx.fillStyle = '#9aa3ad';
     ctx.fillRect(0, 0, VIEW.W, VIEW.H);
     drawPlayLane(ctx, w, D, w.time);
+    drawHazards(ctx, w, D, w.time);
+    this.fx.drawParticles(ctx);
     if (this.state !== 'title') {
       const p = this.player;
       const y = p.prevY + (p.y - p.prevY) * alpha;
@@ -175,13 +223,14 @@ class Game {
     ctx.fillRect(FRAME.right, 0, VIEW.W - FRAME.right, VIEW.H);
     ctx.fillRect(0, FRAME.sill, VIEW.W, VIEW.H - FRAME.sill);
 
-    ctx.fillStyle = '#fff';
-    ctx.font = '20px monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText(`${this.miles.toFixed(1).padStart(5, '0')} mi   BEST ${this.best.toFixed(1)}`, FRAME.right - 20, FRAME.top + 30);
-    ctx.textAlign = 'center';
-    if (this.state === 'title') ctx.fillText('FINGER HERO — press SPACE', VIEW.W / 2, VIEW.H / 2);
-    if (this.state === 'dead') ctx.fillText(`${this.miles.toFixed(1)} mi — SPACE to go again`, VIEW.W / 2, VIEW.H / 2);
+    this.fx.drawSplats(ctx);
+    if (this.state !== 'title') drawHUD(ctx, this);
+    if (this.state === 'title') {
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = `90px ${FONTS.hand}`;
+      ctx.fillText('FINGER HERO', VIEW.W / 2, VIEW.H / 2 - 40);
+      drawPressSpace(ctx, w.time, 1);
+    }
+    if (this.state === 'dead') drawGameOver(ctx, this, this.stateT);
     if (this.debug) this.renderDebug(ctx);
   }
 
@@ -206,6 +255,15 @@ class Game {
       const hb = p.hurtbox();
       ctx.strokeStyle = '#0f0';
       ctx.strokeRect(hb.x, hb.y, hb.w, hb.h);
+      ctx.strokeStyle = '#f33';
+      for (const h of w.hazards) for (const b of h.boxes(w.D, w.time)) ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = 'rgba(80,200,255,0.7)';
+      for (const s of w.surfaces) {
+        const L = s.left(w.D);
+        ctx.beginPath();
+        for (const [lx, y] of s.profile) ctx.lineTo(L + lx, y);
+        ctx.stroke();
+      }
     }
     ctx.restore();
   }
