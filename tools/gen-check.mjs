@@ -7,9 +7,11 @@ import { World } from '../src/world/world.js';
 import { Generator } from '../src/world/generator.js';
 import { airtimeTo, jumpApex } from '../src/player.js';
 import { GEN, PHYSICS, SPEED } from '../src/config.js';
+// Treetops auto-launch. Worst case is landing right at a crown's leading edge, so the gap is measured
+// from there, against a held bounce (the player can also fast-fall to shorten it).
 
 const seeds = +(process.argv[2] ?? 40), seconds = +(process.argv[3] ?? 420);
-let worst = 0, gaps = 0, fails = 0, patterns = {}, biomes = {};
+let worst = 0, worstTree = 0, gaps = 0, fails = 0, patterns = {}, biomes = {};
 const apex = jumpApex();
 for (let seed = 1; seed <= seeds; seed++) {
   const gen = new Generator(seed);
@@ -25,27 +27,31 @@ for (let seed = 1; seed <= seeds; seed++) {
   const log = gen.allSurfaces;
   log.sort((a, b) => a.dLead - b.dLead);
   // Merge into coverage intervals, then check each uncovered stretch.
-  let covEnd = log[0].dTail, covTop = log[0].profile.at(-1)[1];
+  let covEnd = log[0].dTail, covTop = log[0].profile.at(-1)[1], covS = log[0];
   for (let i = 1; i < log.length; i++) {
     const s = log[i];
     if (s.dLead > covEnd) {
       const gap = s.dLead - covEnd;
       const dy = s.profile[0][1] - covTop;
       const S = gen.speedAt(covEnd);
-      const reach = S * airtimeTo(dy);
+      let reach = S * airtimeTo(dy);
+      let need = gap;
+      if (covS.bouncy) { reach = S * airtimeTo(dy, PHYSICS.bounceHoldMul); need = gap + (covS.dTail - covS.dLead); }
       gaps++;
-      const ratio = gap / reach;
-      worst = Math.max(worst, ratio);
-      if (ratio > 1 - GEN.reachSafety + 1e-6 || -dy > apex) {
+      const ratio = need / reach;
+      if (!covS.bouncy) worst = Math.max(worst, ratio); else worstTree = Math.max(worstTree, ratio);
+      // tree chains are pitched so a no-input bounce lands crown-to-crown; worst case keeps >10% spare
+      const limit = covS.bouncy ? 0.9 : 1 - GEN.reachSafety;
+      if (ratio > limit + 1e-6 || -dy > apex) {
         fails++;
         if (fails < 10) console.log(`seed ${seed}: UNFAIR gap ${gap.toFixed(0)} reach ${reach.toFixed(0)} dy ${dy.toFixed(0)} at D ${covEnd.toFixed(0)} (${s.kind})`);
       }
     }
-    if (s.dTail >= covEnd) { covEnd = s.dTail; covTop = s.profile.at(-1)[1]; }
+    if (s.dTail >= covEnd) { covEnd = s.dTail; covTop = s.profile.at(-1)[1]; covS = s; }
   }
   if (gen.checkHazards) fails += gen.checkHazards(seed);
 }
-console.log(`${seeds} seeds x ${seconds}s: ${gaps} gaps, worst gap/reach = ${worst.toFixed(3)} (limit ${(1 - GEN.reachSafety).toFixed(2)}), failures: ${fails}`);
+console.log(`${seeds} seeds x ${seconds}s: ${gaps} gaps, worst gap/reach = ${worst.toFixed(3)} (limit ${(1 - GEN.reachSafety).toFixed(2)}), tree chains ${worstTree.toFixed(3)} (limit 0.90), failures: ${fails}`);
 console.log('time per biome (s):', Object.fromEntries(Object.entries(biomes).map(([k, v]) => [k, +(v / seeds).toFixed(1)])));
 console.log('time per pattern (s):', Object.fromEntries(Object.entries(patterns).map(([k, v]) => [k, +(v / seeds).toFixed(1)])));
 process.exit(fails ? 1 : 0);

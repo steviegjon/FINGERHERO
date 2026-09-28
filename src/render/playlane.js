@@ -3,6 +3,11 @@ import { GEN, VIEW } from '../config.js';
 import { VEHICLES, ROAD_Y } from '../world/vehicles.js';
 
 export function drawPlayLane(ctx, world, D, t) {
+  for (const d of world.decor) {
+    if (d.kind !== 'tunnel') continue;
+    ctx.fillStyle = 'rgba(10,8,6,0.92)';
+    ctx.fillRect(d.left(D), 0, d.w, VIEW.H);
+  }
   // decor first (poles), then static surfaces, then vehicles
   for (const d of world.decor) {
     const L = d.left(D);
@@ -26,7 +31,7 @@ export function drawPlayLane(ctx, world, D, t) {
     }
     if (s.kind === 'polecap') { ctx.fillStyle = '#2f3237'; ctx.fillRect(L, s.top, s.w, 6); continue; }
     if (s.kind === 'chimney') { ctx.fillStyle = '#6b4a3a'; ctx.fillRect(L, s.top, s.w, s.parent.top - s.top); continue; }
-    ctx.fillStyle = s.kind === 'barrier' ? '#5c6068' : '#4a525c';
+    ctx.fillStyle = { barrier: '#5c6068', tree: '#3f5a2e', railing: '#6a5f55', ledge: '#6b5a44', pipe: '#7b6a50' }[s.kind] ?? '#4a525c';
     ctx.beginPath();
     ctx.moveTo(L, GEN.groundY);
     for (const [lx, y] of s.profile) ctx.lineTo(L + lx, y);

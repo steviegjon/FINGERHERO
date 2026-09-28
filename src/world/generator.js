@@ -4,13 +4,13 @@
 // a full jump with airtime τ at speed S covers S·τ of D whatever the surfaces' own speed factors,
 // so one rule covers rooftops, cars, trucks and trains alike:
 //     gapD ≤ S(D) · airtimeTo(Δy) · (1 − GEN.reachSafety)
-import { GEN, SPEED, PLAYER, DIFFICULTY, VIEW } from '../config.js';
+import { GEN, SPEED, PLAYER, DIFFICULTY, VIEW, PHYSICS } from '../config.js';
 import { Surface, Decor } from './entities.js';
 import { RNG, clamp, lerp } from '../util.js';
 import { BIOMES, BIOME_ORDER, PATTERNS } from './biomes.js';
 import { airtimeTo, jumpApex } from '../player.js';
 import { VEHICLES, ROAD_Y } from './vehicles.js';
-import { Bug, Sign, Bird, Overpass, Chimney } from './hazards.js';
+import { Bug, Sign, Bird, Overpass, Chimney, Cable, Vent } from './hazards.js';
 import { SIGNS } from './biomes.js';
 
 const APEX = jumpApex();
@@ -182,6 +182,12 @@ export class Generator {
       if (this.cursorD >= this.nextBiomeD) this.enterNextBiome();
       const seg = this.biomeAt(this.cursorD);
       const biome = BIOMES[seg.id];
+      if (seg.id === 'highway' && !seg.tunnel && !this.forcePattern && this.cursorD > seg.startD + (this.nextBiomeD - seg.startD) * 0.4) {
+        seg.tunnel = true;
+        this.lastPattern = 'tunnel';
+        this.builders.tunnel.call(this, PATTERNS.tunnel, biome);
+        continue;
+      }
       const diff = this.difficultyAt(this.cursorD);
       const choices = Object.entries(biome.patterns)
         .map(([id, wt]) => ({ id, wt, p: PATTERNS[id] }))
@@ -541,4 +547,173 @@ Generator.prototype.checkHazards = function (seed) {
     }
   }
   return bad;
+};
+
+// ---------------------------------------------------------------------------
+// Milestone 4 builders: trucks, tractor, trains, treetops, pole hops, bridges, tunnel.
+
+Generator.prototype.builders.trucks = function (p, biome) {
+  const r = this.rng;
+  const n = r.int(p.count[0], p.count[1]);
+  const k = r.float(p.k[0], p.k[1]);
+  for (let i = 0; i < n; i++) this.placeVehicle('truck', k, biome, { paint: r.int(0, 7), logo: r.int(0, 5) });
+};
+
+Generator.prototype.builders.tractor = function (p, biome) {
+  const r = this.rng;
+  this.placeVehicle('tractor', r.float(p.k[0], p.k[1]), biome, { paint: r.int(0, 2) });
+  // hay wagon behind? keep it simple: a truck sometimes follows the tractor
+  if (r.chance(0.3)) this.placeVehicle('truck', r.float(0.52, 0.6), biome, { paint: r.int(0, 7) });
+};
+
+export const TRAIN_TOP = 432;
+Generator.prototype.builders.train = function (p, biome) {
+  const r = this.rng;
+  const k = r.float(p.k[0], p.k[1]);
+  const n = r.int(p.cars[0], p.cars[1]);
+  const carW = 300, coupling = 22;
+  const top = TRAIN_TOP;
+  const parts = [];
+  let x = 0;
+  for (let i = 0; i < n; i++) {
+    parts.push({ name: 'car', x, w: carW, profile: [[0, top + 8], [10, top], [carW - 10, top], [carW, top + 8]] });
+    x += carW + coupling;
+  }
+  parts.push({ name: 'loco', x, w: 340, profile: [[0, top + 8], [10, top - 6], [240, top - 6], [276, top + 20], [340, top + 44]] });
+  const vehicle = { type: 'train', k, data: { paint: r.int(0, 3), seed: r.int(0, 1e6) } };
+  const gap = this.gapTo(this.clampTop(parts[0].profile[0][1]));
+  const baseD = this.cursorD + gap;
+  const made = parts.map((part) => new Surface({
+    kind: 'vehicle', k, dLead: baseD + part.x / k, w: part.w, profile: part.profile, material: 'metal',
+    biome: biome.name, data: { vehicle, part: part.name, type: 'train' },
+  }));
+  vehicle.parts = made;
+  for (const s of made) this.pushSurface(s);
+};
+
+Generator.prototype.builders.trees = function (p, biome) {
+  const r = this.rng;
+  const n = r.int(p.count[0], p.count[1]);
+  let prevCenterD = null;
+  let prevTop = null;
+  for (let i = 0; i < n; i++) {
+    const wT = r.float(120, 150);
+    const top = clamp(i === 0 ? this.clampTop(this.lastTop + r.float(-25, 25)) : prevTop + r.float(-24, 24), 420, 530);
+    const dome = r.float(18, 26);
+    const profile = [];
+    for (let j = 0; j <= 10; j++) {
+      const u = (j / 10) * 2 - 1;
+      profile.push([(j / 10) * wT, top + dome * (1 - Math.sqrt(1 - u * u * 0.96))]);
+    }
+    let dLead;
+    if (i === 0) dLead = this.cursorD + this.gapTo(profile[0][1]);
+    else {
+      // natural (no-input) bounce from the previous crown lands on this crown
+      const S = this.speedAt(prevCenterD);
+      const pitch = S * airtimeTo(top - prevTop, PHYSICS.bounceMul);
+      dLead = prevCenterD + pitch - wT / 2;
+      dLead = Math.max(dLead, this.cursorD + 20);
+    }
+    const tree = new Surface({ kind: 'tree', dLead, w: wT, profile, bouncy: true, material: 'tree', biome: biome.name, data: { seed: r.int(0, 1e6), dome } });
+    this.pushSurface(tree, { hazardOk: false });
+    prevCenterD = dLead + wT / 2;
+    prevTop = top;
+  }
+  // landing strip: natural bounce from the last crown lands a little way into a long flat roof/wire
+  const S = this.speedAt(prevCenterD);
+  const land = this.clampTop(clamp(prevTop + r.float(-10, 30), 440, 545));
+  const natural = prevCenterD + S * airtimeTo(land - prevTop, PHYSICS.bounceMul);
+  const lead = Math.max(this.cursorD + GEN.minGapSec * S * 0.5, natural - S * 0.35);
+  const len = Math.max(S * 1.4, natural + S * 0.9 - lead);
+  if (biome === BIOMES.country) {
+    this.pushSurface(new Surface({ kind: 'roof', dLead: lead, w: len, top: land, biome: biome.name, data: { style: 'barn', seed: r.int(0, 1e6) } }));
+  } else {
+    this.pushSurface(this.makeRoof(lead, len, land, biome, { style: 'flat' }));
+  }
+};
+
+Generator.prototype.builders.poleHop = function (p, biome) {
+  const r = this.rng;
+  const n = r.int(p.poles[0], p.poles[1]);
+  const capW = 30;
+  for (let i = 0; i < n; i++) {
+    const top = this.clampTop(clamp(this.lastTop + r.float(-28, 28), 400, 520));
+    const gap = this.gapTo(top, r.float(0.45, 0.7));
+    const d = this.cursorD + gap + capW / 2;
+    this.push(new Decor({ kind: 'pole', dLead: d - 6, w: 12, biome: biome.name, data: { top, seed: r.int(0, 1e6), lonely: true } }));
+    this.pushSurface(new Surface({ kind: 'polecap', dLead: d - capW / 2, w: capW, top, material: 'wood', biome: biome.name }), { hazardOk: false });
+  }
+};
+
+Generator.prototype.builders.bridge = function (p, biome) {
+  const r = this.rng;
+  const S = this.speedAt(this.cursorD);
+  const total = S * r.float(p.sec[0], p.sec[1]);
+  const top = this.clampTop(clamp(this.lastTop + r.float(-20, 30), 520, 552));
+  const start = this.cursorD + this.gapTo(top);
+  this.cursorD = start - 1; // gap already applied
+  const segLen = S * r.float(1.5, 2.2);
+  let placed = 0;
+  let first = true;
+  while (placed < total) {
+    const len = Math.min(segLen * r.float(0.8, 1.2), Math.max(S * 1.0, total - placed));
+    const g = first ? 1 : this.gapTo(top, r.float(0.28, 0.5));
+    first = false;
+    const s = new Surface({ kind: 'railing', dLead: this.cursorD + g, w: len, top, biome: biome.name, data: { seed: r.int(0, 1e6) } });
+    this.pushSurface(s);
+    placed += len + g;
+  }
+  this.push(new Decor({ kind: 'bridgeSection', dLead: start - 380, w: this.cursorD - start + 760, biome: biome.name, data: { style: biome === BIOMES.city ? 'truss' : 'arch', seed: r.int(0, 1e6) } }));
+};
+
+Generator.prototype.builders.tunnel = function (p, biome) {
+  const r = this.rng;
+  const S = this.speedAt(this.cursorD);
+  const len = S * r.float(GEN.tunnelSec[0], GEN.tunnelSec[1]);
+  const top = 505;
+  // approach barrier, continuing straight into the ledge at the portal
+  const approach = S * 1.2;
+  const a0 = this.cursorD + this.gapTo(this.clampTop(top));
+  this.pushSurface(new Surface({ kind: 'barrier', dLead: a0, w: approach, top, biome: biome.name }), { hazardOk: false });
+  const portalD = a0 + approach - 60;
+  const exitD = portalD + len;
+  this.push(new Decor({ kind: 'tunnel', dLead: portalD, w: len, biome: biome.name, data: { seed: r.int(0, 1e6), lampEvery: 150 } }));
+  const segStart = this.segLog.length;
+  // ledges (with gaps) and the occasional pipe run slightly higher
+  this.cursorD = portalD - 60;
+  let first = true;
+  while (this.cursorD < exitD - S * 1.2) {
+    const pipe = !first && r.chance(0.3);
+    const t = pipe ? this.clampTop(top - r.float(30, 45)) : top + r.float(-6, 6);
+    const w = S * r.float(0.9, 1.5);
+    const g = first ? 0 : this.gapTo(t);
+    first = false;
+    this.pushSurface(new Surface({ kind: pipe ? 'pipe' : 'ledge', dLead: this.cursorD + g, w, top: t, material: 'metal', biome: biome.name }));
+  }
+  // final ledge runs out through the exit, then the runway continues outside
+  const lastTop = this.clampTop(top);
+  const g = this.gapTo(lastTop);
+  const endLen = Math.max(S * 1.0, exitD - (this.cursorD + g) + S * 0.2);
+  this.pushSurface(new Surface({ kind: 'ledge', dLead: this.cursorD + g, w: endLen, top: lastTop, material: 'metal', biome: biome.name }), { hazardOk: false });
+  // hazards: hanging cables (slide) and floor vents (hop), glowing so they read in the dark
+  const runs = this.runsFrom(this.segLog.slice(segStart));
+  const diff = Math.min(1, this.difficultyAt(this.cursorD));
+  const count = 1 + Math.round(diff * 2);
+  for (let i = 0; i < count; i++) {
+    if (r.chance(0.5)) {
+      const w = 10;
+      const slot = this.findSlot(runs, w);
+      if (!slot) continue;
+      const { hi } = this.topRange(slot.run.segs, slot.D, slot.D + w);
+      const bottom = hi - (PLAYER.slideH + HAZ.slideClear);
+      this.logHazard(new Cable({ kind: 'cable', dLead: slot.D, w, bottom, ceilY: 0, biome: biome.name }), slot.D, slot.D + w, 'slide', 'cable', { refTop: hi, bottom });
+    } else {
+      const w = 34, h = 24;
+      const slot = this.findSlot(runs, w);
+      if (!slot) continue;
+      const { lo } = this.topRange(slot.run.segs, slot.D, slot.D + w);
+      this.logHazard(new Vent({ kind: 'vent', dLead: slot.D, w, top: lo - h, base: lo, biome: biome.name }), slot.D, slot.D + w, 'jump', 'vent', { refTop: lo, height: h });
+    }
+  }
+  this.buildRunway(biome, GEN.runwaySec, true);
 };
