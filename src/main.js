@@ -77,7 +77,8 @@ class Game {
 
   resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const scale = Math.min(window.innerWidth / VIEW.W, window.innerHeight / VIEW.H);
+    const gutter = window.innerWidth < 700 ? 32 : 0; // 16px each side on narrow screens
+    const scale = Math.min((window.innerWidth - gutter) / VIEW.W, window.innerHeight / VIEW.H);
     const cssW = Math.floor(VIEW.W * scale), cssH = Math.floor(VIEW.H * scale);
     this.canvas.style.width = cssW + 'px';
     this.canvas.style.height = cssH + 'px';

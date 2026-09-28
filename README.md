@@ -80,6 +80,9 @@ node tools/bot.mjs 6 420       # a planning autopilot plays real runs headless w
                                # own physics and collision; any death flags an unfair layout
 ```
 
+`sh tools/build-single-file.sh` bundles everything into one self-contained HTML file (uses
+esbuild via npx) for sharing or embedding.
+
 ## Swapping in hand-drawn art
 `hand.js` is the only file that knows what the hand looks like. Put `hand.json` + `hand.png` in
 `assets/hand/`, set `"sheet": "hand.json"` in `assets/hand/manifest.json`, and the
